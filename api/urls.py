@@ -1,5 +1,5 @@
 from django.urls import path
-from catcher_api.api.views import ItemsAPIView
+from api.views import ItemsAPIView
 
 
 urlpatterns = [

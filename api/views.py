@@ -1,7 +1,7 @@
 from rest_framework.views import APIView
 from rest_framework import status
 
-from catcher_api.utils.response import ResponseMixin
+from utils.response import ResponseMixin
 
 
 class ItemsAPIView(APIView, ResponseMixin):
