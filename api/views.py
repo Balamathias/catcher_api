@@ -11,6 +11,8 @@ from django.utils import timezone
 import os
 import uuid
 import requests
+from django.http import HttpResponse
+from django.urls import reverse
 
 
 class ItemsAPIView(APIView, ResponseMixin):
@@ -126,13 +128,6 @@ class ItemsAPIView(APIView, ResponseMixin):
             supabase: Client = request.supabase_client
 
             if item_id is not None:
-                try:
-                    item_id = int(item_id)
-                except (TypeError, ValueError):
-                    return self.response(
-                        error={"detail": "Invalid item id"},
-                        status_code=status.HTTP_400_BAD_REQUEST
-                    )
 
                 response = (
                     supabase.table('items')
@@ -581,6 +576,41 @@ def health_check(request):
     return JsonResponse({"status": "ok"})
 
 
+def paystack_callback(request):
+        """
+        Simple callback endpoint Paystack redirects to after payment.
+        We intentionally keep this public and minimal; the mobile app verifies the reference via /payments/verify/.
+        """
+        reference = request.GET.get("reference", "")
+        status_str = request.GET.get("status", "")
+        html = f"""
+        <!doctype html>
+        <html>
+            <head>
+                <meta charset='utf-8' />
+                <meta name='viewport' content='width=device-width, initial-scale=1' />
+                <title>Payment {'Success' if status_str == 'success' else 'Update'}</title>
+                <style>
+                    body {{ font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; padding: 24px; }}
+                    .card {{ max-width: 560px; margin: 0 auto; border: 1px solid #e5e7eb; border-radius: 12px; padding: 20px; }}
+                    .ok {{ color: #10b981; }}
+                    .info {{ color: #6b7280; }}
+                        .ref {{ }}
+                    .btn {{ display: inline-block; margin-top: 16px; padding: 10px 14px; border: 1px solid #e5e7eb; border-radius: 10px; text-decoration: none; color: #111827; }}
+                </style>
+            </head>
+            <body>
+                <div class='card'>
+                    <h2 class='{('ok' if status_str == 'success' else 'info')}'>Payment {status_str or 'update'}</h2>
+                    <p>Reference: <strong>{reference}</strong></p>
+                    <p>You can now return to the app. We will confirm your payment shortly.</p>
+                </div>
+            </body>
+        </html>
+        """
+        return HttpResponse(html)
+
+
 class ItemsAnalyticsAPIView(APIView, ResponseMixin):
     """
     GET /items/analytics/ — Returns per-user analytics summary for items.
@@ -785,6 +815,11 @@ class PaystackPaymentAPIView(APIView, ResponseMixin):
             amount_kobo = self.FEE_NGN * 100
             reference = f"{user.id}-{uuid.uuid4().hex[:12]}"
             callback_url = os.environ.get("PAYSTACK_CALLBACK_URL")
+            if not callback_url:
+                try:
+                    callback_url = request.build_absolute_uri(reverse('payments-callback'))
+                except Exception:
+                    callback_url = None
 
             payload = {
                 "email": email,
