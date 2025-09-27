@@ -21,8 +21,6 @@ class SupabaseUser:
 
     @property
     def is_authenticated(self):
-        if self.role in ['suspended', 'banned']:
-            return False
         return True
     
 
@@ -39,9 +37,6 @@ class SupabaseAuthentication(BaseAuthentication):
             raise AuthenticationFailed("Invalid or expired Supabase token")
 
         user = SupabaseUser(user_data)
-
-        if user.role in ['suspended', 'banned']:
-            raise AuthenticationFailed("User account is suspended or banned")
 
         return SupabaseUser(user_data), None
 
