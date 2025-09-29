@@ -233,11 +233,39 @@ class ItemsAPIView(APIView, ResponseMixin):
             # server-side ownership
             payload["user_id"] = str(user.id)
 
-            response = (
-                supabase.table('items')
-                .insert(payload)
-                .execute()
-            )
+            # Enforce payment credit atomically via RPC
+            try:
+                rpc_resp = supabase.rpc(
+                    'consume_registration_credit',
+                    { 'p_user_id': str(user.id) }
+                ).execute()
+                consumed = bool(getattr(rpc_resp, 'data', False))
+                if not consumed:
+                    return self.response(
+                        error={"detail": "No registration credit available. Complete payment and try again."},
+                        status_code=status.HTTP_402_PAYMENT_REQUIRED,
+                        message="Payment required before registration.",
+                    )
+            except Exception:
+                return self.response(
+                    error={"detail": "Unable to verify registration credit. Please try again."},
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    message="Credit verification failed",
+                )
+
+            try:
+                response = (
+                    supabase.table('items')
+                    .insert(payload)
+                    .execute()
+                )
+            except Exception as insert_err:
+                # Attempt to re-credit on failure to avoid losing a consumed credit
+                try:
+                    _ = supabase.rpc('credit_registration', { 'p_user_id': str(user.id), 'p_amount': 1 }).execute()
+                except Exception:
+                    pass
+                raise insert_err
 
             data = None
             if response and getattr(response, 'data', None):
@@ -906,6 +934,36 @@ class PaystackPaymentAPIView(APIView, ResponseMixin):
             status_str = (data_out.get("status") or "").lower()
             amount = int(data_out.get("amount") or 0)
             verified = status_str == "success" and amount >= (self.FEE_NGN * 100)
+
+            # If verified, upsert payment record and credit the user with 1 registration token
+            if verified:
+                user_id = str(user.id)
+                try:
+                    # Store a payment row (optional but useful for audit)
+                    _ = (
+                        request.supabase_client
+                        .table('payments')
+                        .upsert({
+                            'reference': reference,
+                            'user_id': user_id,
+                            'amount': amount,
+                            'status': status_str,
+                            'paid_at': data_out.get('paid_at') or timezone.now().isoformat(),
+                            'channel': data_out.get('channel')
+                        }, on_conflict='reference')
+                        .execute()
+                    )
+                except Exception:
+                    pass
+
+                # Credit the user via RPC (idempotent + creates row if missing)
+                try:
+                    _ = request.supabase_client.rpc(
+                        'credit_registration',
+                        { 'p_user_id': user_id, 'p_amount': 1 }
+                    ).execute()
+                except Exception:
+                    pass
 
             return self.response(
                 data={
