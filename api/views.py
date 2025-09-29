@@ -985,3 +985,49 @@ class PaystackPaymentAPIView(APIView, ResponseMixin):
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 message="Failed to verify payment",
             )
+
+
+class UserCreditsAPIView(APIView, ResponseMixin):
+    """
+    GET /payments/credits/ — Returns the authenticated user's available registration credits.
+
+    Response: { "available": number }
+    """
+    permission_classes = []
+
+    def get(self, request):
+        try:
+            user = request.user
+            if not getattr(user, "is_authenticated", False):
+                return self.response(
+                    error="Authentication required",
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                )
+
+            supabase: Client = request.supabase_client
+            sel = (
+                supabase.table('payment_credits')
+                .select('available')
+                .eq('user_id', str(user.id))
+                .single()
+                .execute()
+            )
+            available = 0
+            if sel and getattr(sel, 'data', None):
+                try:
+                    available = int((sel.data or {}).get('available') or 0)
+                except Exception:
+                    available = 0
+
+            return self.response(
+                data={"available": available},
+                status_code=status.HTTP_200_OK,
+                message="Credits fetched successfully.",
+            )
+        except Exception as e:
+            print(e)
+            return self.response(
+                error={"detail": str(e)},
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                message="Failed to fetch credits",
+            )
