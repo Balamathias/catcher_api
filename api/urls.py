@@ -1,6 +1,7 @@
 from django.urls import path
-from api.views import (ItemsAPIView, health_check, 
-                        SearchRegistry, ItemsAnalyticsAPIView, PaystackPaymentAPIView, paystack_callback, UserCreditsAPIView
+from api.views import (ItemsAPIView, health_check,
+                        SearchRegistry, ItemsAnalyticsAPIView, PaystackPaymentAPIView, paystack_callback, UserCreditsAPIView,
+                        DeleteAccountAPIView
                        )
 
 
@@ -16,5 +17,6 @@ urlpatterns = [
     path('payments/callback/', paystack_callback, name='payments-callback'),
 
     path('registry/search/', SearchRegistry.as_view(), name='search-registry'),
-    
+
+    path('account/delete/', DeleteAccountAPIView.as_view(), name='account-delete'),
 ]

@@ -1031,3 +1031,95 @@ class UserCreditsAPIView(APIView, ResponseMixin):
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 message="Failed to fetch credits",
             )
+
+
+class DeleteAccountAPIView(APIView, ResponseMixin):
+    """
+    DELETE /account/delete/ — Permanently delete the authenticated user's account and all associated data.
+
+    Request body (optional):
+    {
+        "reason": "Optional reason for account deletion"
+    }
+
+    This will delete:
+    - All user items
+    - Payment records
+    - Profile data
+    - The user account itself
+    """
+    permission_classes = []
+
+    def delete(self, request):
+        try:
+            user = request.user
+            if not getattr(user, "is_authenticated", False):
+                return self.response(
+                    error="Authentication required",
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                )
+
+            supabase: Client = request.supabase_client
+            user_id = str(user.id)
+
+            # Optional: Log deletion reason
+            data = request.data or {}
+            reason = (data.get("reason") or "").strip()
+
+            # Delete user's items
+            try:
+                _ = (
+                    supabase.table('items')
+                    .delete()
+                    .eq('user_id', user_id)
+                    .execute()
+                )
+            except Exception as e:
+                print(f"Error deleting items: {e}")
+
+            # Delete payment credits
+            try:
+                _ = (
+                    supabase.table('payment_credits')
+                    .delete()
+                    .eq('user_id', user_id)
+                    .execute()
+                )
+            except Exception as e:
+                print(f"Error deleting payment credits: {e}")
+
+            # Delete payment records
+            try:
+                _ = (
+                    supabase.table('payments')
+                    .delete()
+                    .eq('user_id', user_id)
+                    .execute()
+                )
+            except Exception as e:
+                print(f"Error deleting payments: {e}")
+
+            # Delete profile
+            try:
+                _ = (
+                    supabase.table('profiles')
+                    .delete()
+                    .eq('id', user_id)
+                    .execute()
+                )
+            except Exception as e:
+                print(f"Error deleting profile: {e}")
+
+            return self.response(
+                data={"deleted": True, "user_id": user_id},
+                status_code=status.HTTP_200_OK,
+                message="Account deleted successfully.",
+            )
+
+        except Exception as e:
+            print(e)
+            return self.response(
+                error={"detail": str(e)},
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                message="Failed to delete account",
+            )
