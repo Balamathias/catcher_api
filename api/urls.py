@@ -1,7 +1,7 @@
 from django.urls import path
 from api.views import (ItemsAPIView, health_check,
                         SearchRegistry, ItemsAnalyticsAPIView, PaystackPaymentAPIView, paystack_callback, UserCreditsAPIView,
-                        DeleteAccountAPIView
+                        DeleteAccountAPIView, MobileProfileAPIView
                        )
 
 
@@ -19,4 +19,7 @@ urlpatterns = [
     path('registry/search/', SearchRegistry.as_view(), name='search-registry'),
 
     path('account/delete/', DeleteAccountAPIView.as_view(), name='account-delete'),
+
+    # Mobile profile endpoints
+    path('mobile/profile/', MobileProfileAPIView.as_view(), name='mobile-profile'),
 ]

@@ -1123,3 +1123,94 @@ class DeleteAccountAPIView(APIView, ResponseMixin):
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 message="Failed to delete account",
             )
+
+
+class MobileProfileAPIView(APIView, ResponseMixin):
+    """
+    GET /mobile/profile/ — Return the authenticated user's profile row (or null if missing)
+    PUT /mobile/profile/ — Create or update the authenticated user's profile
+
+    Accepted fields on PUT: display_name, avatar_url
+    """
+    permission_classes = []
+
+    def get(self, request):
+        try:
+            user = request.user
+            if not getattr(user, "is_authenticated", False):
+                return self.response(
+                    error="Authentication required",
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                )
+
+            supabase: Client = request.supabase_client
+            sel = (
+                supabase.table('profiles')
+                .select('*')
+                .eq('user_id', str(user.id))
+                .limit(1)
+                .execute()
+            )
+            rows = getattr(sel, 'data', None) or []
+            profile = rows[0] if rows else None
+            return self.response(data=profile, status_code=status.HTTP_200_OK)
+        except Exception as e:
+            print(e)
+            return self.response(
+                error={"detail": str(e)},
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                message="Failed to fetch profile",
+            )
+
+    def put(self, request):
+        try:
+            user = request.user
+            if not getattr(user, "is_authenticated", False):
+                return self.response(
+                    error="Authentication required",
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                )
+
+            data = request.data or {}
+            update_payload: Dict[str, Any] = {}
+            if 'display_name' in data:
+                val = data.get('display_name')
+                update_payload['display_name'] = (str(val)[:120] if val is not None else None)
+            if 'avatar_url' in data:
+                val = data.get('avatar_url')
+                update_payload['avatar_url'] = (str(val) if val is not None else None)
+
+            if not update_payload:
+                return self.response(
+                    error={"detail": "No updatable fields provided"},
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                )
+
+            supabase: Client = request.supabase_client
+            # Try update first
+            upd = (
+                supabase.table('profiles')
+                .update({ **update_payload, 'updated_at': timezone.now().isoformat() })
+                .eq('user_id', str(user.id))
+                .execute()
+            )
+            updated_rows = getattr(upd, 'data', None) or []
+            if updated_rows:
+                return self.response(data=updated_rows[0], status_code=status.HTTP_200_OK)
+
+            # If no row existed, insert
+            ins = (
+                supabase.table('profiles')
+                .insert({ 'user_id': str(user.id), **update_payload })
+                .execute()
+            )
+            inserted_rows = getattr(ins, 'data', None) or []
+            profile = inserted_rows[0] if inserted_rows else None
+            return self.response(data=profile, status_code=status.HTTP_200_OK)
+        except Exception as e:
+            print(e)
+            return self.response(
+                error={"detail": str(e)},
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                message="Failed to update profile",
+            )
