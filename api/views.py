@@ -1186,22 +1186,25 @@ class MobileProfileAPIView(APIView, ResponseMixin):
                     status_code=status.HTTP_400_BAD_REQUEST,
                 )
 
-            supabase: Client = request.supabase_client
-            # Try update first
+            # Use service role client for write to bypass RLS while enforcing our own auth checks
+            from services.supabase import superbase as service_client  # local import to avoid circulars at import time
+            supa: Client = service_client
+
+            # Try update first (match either user_id or id to be safe with schema variations)
             upd = (
-                supabase.table('profiles')
+                supa.table('profiles')
                 .update({ **update_payload, 'updated_at': timezone.now().isoformat() })
-                .eq('user_id', str(user.id))
+                .or_(f"user_id.eq.{str(user.id)},id.eq.{str(user.id)}")
                 .execute()
             )
             updated_rows = getattr(upd, 'data', None) or []
             if updated_rows:
                 return self.response(data=updated_rows[0], status_code=status.HTTP_200_OK)
 
-            # If no row existed, insert
+            # If no row existed, insert both id and user_id to satisfy common RLS checks
             ins = (
-                supabase.table('profiles')
-                .insert({ 'user_id': str(user.id), **update_payload })
+                supa.table('profiles')
+                .insert({ 'id': str(user.id), 'user_id': str(user.id), **update_payload })
                 .execute()
             )
             inserted_rows = getattr(ins, 'data', None) or []
