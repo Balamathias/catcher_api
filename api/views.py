@@ -812,7 +812,7 @@ class PaystackPaymentAPIView(APIView, ResponseMixin):
     """
     permission_classes = []
 
-    FEE_NGN = 100  # ₦100 as requested
+    FEE_NGN = 5000  # ₦5000 as requested
 
     def post(self, request):
         """Initialize transaction and return authorization_url and reference."""
@@ -1122,6 +1122,35 @@ class DeleteAccountAPIView(APIView, ResponseMixin):
                 error={"detail": str(e)},
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 message="Failed to delete account",
+            )
+
+
+class PaymentConfigAPIView(APIView, ResponseMixin):
+    """
+    GET /payments/config/ — Returns payment configuration such as current registration fee and currency.
+
+    Response: { "fee_ngn": number, "fee_kobo": number, "currency": "NGN" }
+    """
+    permission_classes = []
+
+    def get(self, request):
+        try:
+            fee = getattr(PaystackPaymentAPIView, 'FEE_NGN', 100)
+            return self.response(
+                data={
+                    "fee_ngn": int(fee),
+                    "fee_kobo": int(fee) * 100,
+                    "currency": "NGN",
+                },
+                status_code=status.HTTP_200_OK,
+                message="Payment configuration fetched successfully.",
+            )
+        except Exception as e:
+            print(e)
+            return self.response(
+                error={"detail": str(e)},
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                message="Failed to fetch payment configuration",
             )
 
 
