@@ -154,6 +154,7 @@ class ItemsAPIView(APIView, ResponseMixin):
             limit = self._parse_int(request.query_params.get('limit'), 30)
             offset = self._parse_int(request.query_params.get('offset'), 0)
             query = (request.query_params.get('query') or '').strip()
+            status_filter = (request.query_params.get('status') or '').strip().lower()
 
             count_q = (
                 supabase.table('items')
@@ -167,9 +168,16 @@ class ItemsAPIView(APIView, ResponseMixin):
                 .eq('user_id', str(user.id))
             )
 
+            # Apply status filter if provided
+            if status_filter:
+                allowed_statuses = {"safe", "stolen", "unknown"}
+                if status_filter in allowed_statuses:
+                    count_q = count_q.eq('status', status_filter)
+                    data_q = data_q.eq('status', status_filter)
+
             if query:
                 pattern = f"%{query}%"
-                or_clause = f"name.ilike.{pattern},description.ilike.{pattern}"
+                or_clause = f"name.ilike.{pattern},description.ilike.{pattern},serial_number.ilike.{pattern}"
                 count_q = count_q.or_(or_clause)
                 data_q = data_q.or_(or_clause)
 
@@ -533,6 +541,7 @@ class SearchRegistry(APIView, ResponseMixin):
         "offset": 0                   # optional
     }
     Returns a paginated list of items matching the search across the entire registry (all users).
+    Includes owner profile information (avatar, next of kin) from the profiles table.
     """
     permission_classes = []
 
@@ -548,6 +557,7 @@ class SearchRegistry(APIView, ResponseMixin):
             limit = ItemsAPIView._parse_int(data.get("limit"), 30)
             offset = ItemsAPIView._parse_int(data.get("offset"), 0)
 
+            # Build query for items
             q = supabase.table("items").select("*", count="exact")  # type: ignore[arg-type]
 
             if query:
@@ -570,17 +580,68 @@ class SearchRegistry(APIView, ResponseMixin):
             if serial_number:
                 q = q.eq("serial_number", serial_number)
 
+            # Get count first
             count_response = q.execute()
             total_count = count_response.count or 0
 
+            # Now fetch paginated data
+            q = supabase.table("items").select("*")
+
+            if query:
+                pattern = f"%{query}%"
+                or_clause = f"name.ilike.{pattern},description.ilike.{pattern},category.ilike.{pattern},serial_number.ilike.{pattern}"
+                q = q.or_(or_clause)
+
+            if category:
+                q = q.eq("category", category)
+
+            if status_val:
+                q = q.eq("status", status_val)
+
+            if serial_number:
+                q = q.eq("serial_number", serial_number)
+
             q = q.order("created_at", desc=True).range(offset, max(offset + limit - 1, offset))
             response = q.execute()
+
+            items_data = response.data or []
+
+            # Collect unique user_ids to fetch profiles
+            user_ids = list(set(item.get('user_id') for item in items_data if item.get('user_id')))
+
+            # Fetch profiles for these user_ids in a single query
+            profiles_map: Dict[str, Dict[str, Any]] = {}
+            if user_ids:
+                try:
+                    profiles_resp = (
+                        supabase.table("profiles")
+                        .select("user_id, avatar_url, next_of_kin_name, next_of_kin_phone")
+                        .in_("user_id", user_ids)
+                        .execute()
+                    )
+                    for profile in (profiles_resp.data or []):
+                        uid = profile.get('user_id')
+                        if uid:
+                            profiles_map[uid] = profile
+                except Exception as profile_err:
+                    # If profile fetch fails, continue without profile data
+                    print(f"Failed to fetch profiles: {profile_err}")
+
+            # Enrich items with profile data
+            items = []
+            for item in items_data:
+                user_id = item.get('user_id')
+                profile = profiles_map.get(user_id, {}) if user_id else {}
+                item['owner_avatar_url'] = profile.get('avatar_url')
+                item['next_of_kin_name'] = profile.get('next_of_kin_name')
+                item['next_of_kin_phone'] = profile.get('next_of_kin_phone')
+                items.append(item)
 
             next_offset = offset + limit if (offset + limit) < total_count else None
             prev_offset = offset - limit if offset > 0 else None
 
             return self.response(
-                data=response.data or [],
+                data=items,
                 count=total_count,
                 next=next_offset,
                 previous=prev_offset,
@@ -897,7 +958,12 @@ class PaystackPaymentAPIView(APIView, ResponseMixin):
             )
 
     def get(self, request):
-        """Verify a transaction by reference (?reference=...)."""
+        """Verify a transaction by reference (?reference=...).
+
+        IMPORTANT: This endpoint is idempotent - it will only credit the user ONCE
+        per payment reference. Subsequent calls with the same reference will return
+        verified=True but will not add additional credits.
+        """
         try:
             user = request.user
             if not getattr(user, "is_authenticated", False):
@@ -920,6 +986,32 @@ class PaystackPaymentAPIView(APIView, ResponseMixin):
                     status_code=status.HTTP_400_BAD_REQUEST,
                 )
 
+            user_id = str(user.id)
+            supabase: Client = request.supabase_client
+
+            # IDEMPOTENCY CHECK: First, check if this payment reference has already been credited
+            # This prevents double-crediting when user verifies the same payment multiple times
+            already_credited = False
+            try:
+                existing_payment = (
+                    supabase.table('payments')
+                    .select('reference, status, credited')
+                    .eq('reference', reference)
+                    .single()
+                    .execute()
+                )
+                if existing_payment and existing_payment.data:
+                    payment_data = existing_payment.data
+                    # If payment exists and was already credited, skip crediting
+                    if payment_data.get('credited') == True:
+                        already_credited = True
+                    # If payment exists with success status, it's already processed
+                    elif payment_data.get('status') == 'success':
+                        already_credited = True
+            except Exception:
+                # Payment doesn't exist yet, that's fine - we'll create it
+                pass
+
             headers = {"Authorization": f"Bearer {secret_key}"}
             url = f"https://api.paystack.co/transaction/verify/{reference}"
             resp = requests.get(url, headers=headers, timeout=30)
@@ -935,35 +1027,39 @@ class PaystackPaymentAPIView(APIView, ResponseMixin):
             amount = int(data_out.get("amount") or 0)
             verified = status_str == "success" and amount >= (self.FEE_NGN * 100)
 
-            # If verified, upsert payment record and credit the user with 1 registration token
-            if verified:
-                user_id = str(user.id)
+            # If verified and NOT already credited, store payment and credit user
+            if verified and not already_credited:
                 try:
-                    # Store a payment row (optional but useful for audit)
+                    # Store payment record with credited=True to prevent double-crediting
+                    # The 'credited' column acts as an idempotency key
                     _ = (
-                        request.supabase_client
-                        .table('payments')
+                        supabase.table('payments')
                         .upsert({
                             'reference': reference,
                             'user_id': user_id,
                             'amount': amount,
                             'status': status_str,
                             'paid_at': data_out.get('paid_at') or timezone.now().isoformat(),
-                            'channel': data_out.get('channel')
+                            'channel': data_out.get('channel'),
+                            'credited': True,  # Mark as credited to prevent double-credit
                         }, on_conflict='reference')
                         .execute()
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"Error storing payment record: {e}")
 
-                # Credit the user via RPC (idempotent + creates row if missing)
+                # Credit the user via RPC (only if not already credited)
                 try:
-                    _ = request.supabase_client.rpc(
+                    _ = supabase.rpc(
                         'credit_registration',
                         { 'p_user_id': user_id, 'p_amount': 1 }
                     ).execute()
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"Error crediting user: {e}")
+            elif verified and already_credited:
+                # Payment was already credited - just update the record if needed
+                # but DON'T credit again
+                print(f"Payment {reference} already credited, skipping credit")
 
             return self.response(
                 data={
@@ -974,6 +1070,7 @@ class PaystackPaymentAPIView(APIView, ResponseMixin):
                     "gateway_response": data_out.get("gateway_response"),
                     "paid_at": data_out.get("paid_at"),
                     "channel": data_out.get("channel"),
+                    "already_credited": already_credited,  # Let client know if this was a repeat verification
                 },
                 status_code=status.HTTP_200_OK,
                 message="Verification complete",
@@ -1159,9 +1256,36 @@ class MobileProfileAPIView(APIView, ResponseMixin):
     GET /mobile/profile/ — Return the authenticated user's profile row (or null if missing)
     PUT /mobile/profile/ — Create or update the authenticated user's profile
 
-    Accepted fields on PUT: display_name, avatar_url
+    Accepted fields on PUT: display_name, avatar_url, nin, next_of_kin_name, next_of_kin_phone
     """
     permission_classes = []
+
+    @staticmethod
+    def _validate_nin(value: Any) -> Optional[str]:
+        """Validate NIN: must be exactly 11 digits if provided."""
+        if value is None or value == "":
+            return None
+        nin_str = str(value).strip()
+        if not nin_str:
+            return None
+        # Remove any spaces
+        nin_str = nin_str.replace(" ", "")
+        # Must be exactly 11 digits
+        if len(nin_str) != 11 or not nin_str.isdigit():
+            return None  # Return None for invalid NIN (or could raise an error)
+        return nin_str
+
+    @staticmethod
+    def _validate_phone(value: Any) -> Optional[str]:
+        """Validate phone number: basic cleanup."""
+        if value is None or value == "":
+            return None
+        phone_str = str(value).strip()
+        if not phone_str:
+            return None
+        # Remove spaces and dashes
+        phone_str = phone_str.replace(" ", "").replace("-", "")
+        return phone_str[:20] if phone_str else None
 
     def get(self, request):
         try:
@@ -1202,12 +1326,41 @@ class MobileProfileAPIView(APIView, ResponseMixin):
 
             data = request.data or {}
             update_payload: Dict[str, Any] = {}
+
+            # Display name
             if 'display_name' in data:
                 val = data.get('display_name')
                 update_payload['display_name'] = (str(val)[:120] if val is not None else None)
+
+            # Avatar URL
             if 'avatar_url' in data:
                 val = data.get('avatar_url')
                 update_payload['avatar_url'] = (str(val) if val is not None else None)
+
+            # NIN (National Identification Number) - 11 digits
+            if 'nin' in data:
+                val = data.get('nin')
+                if val is not None and val != "":
+                    nin_validated = self._validate_nin(val)
+                    if nin_validated is None and str(val).strip():
+                        # NIN was provided but invalid
+                        return self.response(
+                            error={"detail": "NIN must be exactly 11 digits"},
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                        )
+                    update_payload['nin'] = nin_validated
+                else:
+                    update_payload['nin'] = None
+
+            # Next of Kin Name
+            if 'next_of_kin_name' in data:
+                val = data.get('next_of_kin_name')
+                update_payload['next_of_kin_name'] = (str(val)[:255] if val is not None and val != "" else None)
+
+            # Next of Kin Phone
+            if 'next_of_kin_phone' in data:
+                val = data.get('next_of_kin_phone')
+                update_payload['next_of_kin_phone'] = self._validate_phone(val)
 
             if not update_payload:
                 return self.response(
