@@ -611,11 +611,12 @@ class SearchRegistry(APIView, ResponseMixin):
 
             # Fetch profiles for these user_ids in a single query
             profiles_map: Dict[str, Dict[str, Any]] = {}
+            auth_users_map: Dict[str, Dict[str, Any]] = {}
             if user_ids:
                 try:
                     profiles_resp = (
                         supabase.table("profiles")
-                        .select("user_id, avatar_url, next_of_kin_name, next_of_kin_phone")
+                        .select("user_id, display_name, avatar_url, nin, next_of_kin_name, next_of_kin_phone")
                         .in_("user_id", user_ids)
                         .execute()
                     )
@@ -627,14 +628,39 @@ class SearchRegistry(APIView, ResponseMixin):
                     # If profile fetch fails, continue without profile data
                     print(f"Failed to fetch profiles: {profile_err}")
 
-            # Enrich items with profile data
+                # Fetch auth.users data (email, phone) using service role client
+                try:
+                    from services.supabase import superbase as service_client
+                    # Use Supabase Admin API to get user details
+                    for uid in user_ids:
+                        try:
+                            user_resp = service_client.auth.admin.get_user_by_id(uid)
+                            if user_resp and user_resp.user:
+                                user_data = user_resp.user
+                                auth_users_map[uid] = {
+                                    'email': user_data.email,
+                                    'phone': user_data.phone or (user_data.user_metadata or {}).get('phone'),
+                                }
+                        except Exception as user_err:
+                            print(f"Failed to fetch auth user {uid}: {user_err}")
+                except Exception as auth_err:
+                    print(f"Failed to fetch auth users: {auth_err}")
+
+            # Enrich items with profile data and auth user data
             items = []
             for item in items_data:
                 user_id = item.get('user_id')
                 profile = profiles_map.get(user_id, {}) if user_id else {}
+                auth_user = auth_users_map.get(user_id, {}) if user_id else {}
                 item['owner_avatar_url'] = profile.get('avatar_url')
                 item['next_of_kin_name'] = profile.get('next_of_kin_name')
                 item['next_of_kin_phone'] = profile.get('next_of_kin_phone')
+                # Registrar (post creator) info from profile
+                item['registrar_name'] = profile.get('display_name')
+                item['registrar_nin'] = profile.get('nin')
+                # Registrar contact info from auth.users
+                item['registrar_email'] = auth_user.get('email')
+                item['registrar_phone'] = auth_user.get('phone')
                 items.append(item)
 
             next_offset = offset + limit if (offset + limit) < total_count else None
